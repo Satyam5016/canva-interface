@@ -79,6 +79,16 @@ The mock backend provides:
 
 Graph responses include service/database/cache nodes, edges, provider details, status, metrics, positions, and simulated latency.
 
+## Vercel Deployment
+
+The production deployment uses Vercel serverless API routes under `api/` that mirror the local Express mock API. The frontend still calls the same `/api/apps` and `/api/apps/:appId/graph` paths, so no production environment variable is required.
+
+Live app:
+
+```text
+https://canva-interface.vercel.app
+```
+
 ## Architecture
 
 Frontend code is split by responsibility:
@@ -96,6 +106,13 @@ Backend code is intentionally small:
 - `server/src/index.ts`: Express app bootstrap
 - `server/src/routes/apps.ts`: app and graph routes
 - `server/src/data/mockData.ts`: in-memory mock data
+
+Vercel deployment code:
+
+- `api/apps/index.js`: serverless apps route
+- `api/apps/[appId]/graph.js`: serverless graph route
+- `api/data.js`: shared deployment mock data
+- `vercel.json`: build output and SPA rewrite config
 
 ## Key Decisions
 

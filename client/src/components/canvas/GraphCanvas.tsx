@@ -1,5 +1,7 @@
 import {
   addEdge,
+  applyEdgeChanges,
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -7,9 +9,9 @@ import {
   ReactFlow,
   type Connection,
   type Edge,
+  type EdgeChange,
+  type NodeChange,
   type NodeTypes,
-  useEdgesState,
-  useNodesState,
   useReactFlow
 } from "@xyflow/react";
 import { AlertTriangle, Loader2, Plus, RotateCcw } from "lucide-react";
@@ -36,9 +38,9 @@ const nodeTypes = { serviceNode: CustomNode } satisfies NodeTypes;
 export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdaterReady }: GraphCanvasProps) {
   const { selectedAppId, selectedNodeId, setSelectedNodeId, togglePanel, setMobilePanelOpen } = useAppStore();
   const { data, isLoading, isError, refetch } = useGraphQuery(selectedAppId);
-  const [nodes, setNodes, onNodesChange] = useNodesState<ServiceFlowNode>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [cache, setCache] = useState<Record<string, CachedGraph>>({});
+  const [nodes, setNodes] = useState<ServiceFlowNode[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
+  const graphCacheRef = useRef<Record<string, CachedGraph>>({});
   const { fitView } = useReactFlow();
   const didFitAppRef = useRef<string | null>(null);
 
@@ -56,19 +58,19 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
       return;
     }
 
-    const cached = cache[selectedAppId];
+    const cached = graphCacheRef.current[selectedAppId];
     if (cached) {
       setNodes(cached.nodes);
       setEdges(cached.edges);
       return;
     }
 
-    const loadedNodes: ServiceFlowNode[] = data.nodes.map((node) => ({
-      id: node.id,
+    const loadedNodes: ServiceFlowNode[] = data.nodes.map(({ position, ...nodeData }) => ({
+      id: nodeData.id,
       type: "serviceNode",
-      position: node.position,
+      position,
       data: {
-        ...node,
+        ...nodeData,
         lastUpdated: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
       }
     }));
@@ -81,19 +83,18 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
 
     setNodes(loadedNodes);
     setEdges(loadedEdges);
-    setCache((current) => ({ ...current, [selectedAppId]: { nodes: loadedNodes, edges: loadedEdges } }));
+    graphCacheRef.current[selectedAppId] = { nodes: loadedNodes, edges: loadedEdges };
     didFitAppRef.current = null;
-  }, [cache, data, selectedAppId, setEdges, setNodes]);
+  }, [data, selectedAppId]);
 
-  useEffect(() => {
-    setCache((current) => {
-      if (!selectedAppId || nodes.length === 0) {
-        return current;
+  const persistGraph = useCallback(
+    (nextNodes: ServiceFlowNode[], nextEdges: Edge[]) => {
+      if (selectedAppId && nextNodes.length > 0) {
+        graphCacheRef.current[selectedAppId] = { nodes: nextNodes, edges: nextEdges };
       }
-
-      return { ...current, [selectedAppId]: { nodes, edges } };
-    });
-  }, [edges, nodes, selectedAppId]);
+    },
+    [selectedAppId]
+  );
 
   const runFitView = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -103,8 +104,8 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
 
   const updateNodeData = useCallback(
     (nodeId: string, dataUpdate: Partial<ServiceNodeData>) => {
-      setNodes((current) =>
-        current.map((node) =>
+      setNodes((current) => {
+        const nextNodes = current.map((node) =>
           node.id === nodeId
             ? {
                 ...node,
@@ -115,10 +116,12 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
                 }
               }
             : node
-        )
-      );
+        );
+        persistGraph(nextNodes, edges);
+        return nextNodes;
+      });
     },
-    [setNodes]
+    [edges, persistGraph]
   );
 
   useEffect(() => {
@@ -145,8 +148,16 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
       }
 
       if ((event.key === "Delete" || event.key === "Backspace") && selectedNodeId) {
-        setNodes((current) => current.filter((node) => node.id !== selectedNodeId));
-        setEdges((current) => current.filter((edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId));
+        const nextNodes = nodes.filter((node) => node.id !== selectedNodeId);
+        const nextEdges = edges.filter((edge) => edge.source !== selectedNodeId && edge.target !== selectedNodeId);
+
+        setNodes(nextNodes);
+        setEdges(nextEdges);
+        if (nextNodes.length > 0) {
+          persistGraph(nextNodes, nextEdges);
+        } else {
+          delete graphCacheRef.current[selectedAppId];
+        }
         setSelectedNodeId(null);
       }
 
@@ -161,11 +172,38 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [runFitView, selectedNodeId, setEdges, setNodes, setSelectedNodeId, togglePanel]);
+  }, [edges, nodes, persistGraph, runFitView, selectedAppId, selectedNodeId, setSelectedNodeId, togglePanel]);
 
   const onConnect = useCallback(
-    (connection: Connection) => setEdges((current) => addEdge({ ...connection, type: "smoothstep", animated: true }, current)),
-    [setEdges]
+    (connection: Connection) =>
+      setEdges((current) => {
+        const nextEdges = addEdge({ ...connection, type: "smoothstep", animated: true }, current);
+        persistGraph(nodes, nextEdges);
+        return nextEdges;
+      }),
+    [nodes, persistGraph]
+  );
+
+  const onNodesChange = useCallback(
+    (changes: NodeChange<ServiceFlowNode>[]) => {
+      setNodes((current) => {
+        const nextNodes = applyNodeChanges(changes, current) as ServiceFlowNode[];
+        persistGraph(nextNodes, edges);
+        return nextNodes;
+      });
+    },
+    [edges, persistGraph]
+  );
+
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      setEdges((current) => {
+        const nextEdges = applyEdgeChanges(changes, current);
+        persistGraph(nodes, nextEdges);
+        return nextEdges;
+      });
+    },
+    [nodes, persistGraph]
   );
 
   const addNode = useCallback(() => {
@@ -188,10 +226,14 @@ export function GraphCanvas({ onSelectedNodeChange, onFitViewReady, onNodeUpdate
       }
     };
 
-    setNodes((current) => [...current, nextNode]);
+    setNodes((current) => {
+      const nextNodes = [...current, nextNode];
+      persistGraph(nextNodes, edges);
+      return nextNodes;
+    });
     setSelectedNodeId(id);
     setMobilePanelOpen(true);
-  }, [nodes.length, setMobilePanelOpen, setNodes, setSelectedNodeId]);
+  }, [edges, nodes.length, persistGraph, setMobilePanelOpen, setSelectedNodeId]);
 
   return (
     <div className="relative h-full w-full">
